@@ -1,38 +1,48 @@
-FROM php:8.3-apache
+FROM ubuntu:24.04
 
-# Install additional dependencies
-RUN apt-get update && \
+# Accept build arguments
+ARG USER_ID=1000
+ARG GROUP_ID=1000
+ARG USERNAME=devuser
+
+# Install dependencies and some build env tools
+RUN export DEBIAN_FRONTEND=noninteractive && \
+    apt-get update && \
     apt-get install -y \
-        git \
-        zip \
-        unzip \
-        libfreetype-dev \
-        libjpeg62-turbo-dev \
-        libldap2-dev \
-        libpng-dev \
-        libzip-dev \
-        wait-for-it && \
-    rm -rf /var/lib/apt/lists/*
+        bash git tmux vim nano htop curl supervisor unzip sudo \
+        mysql-server-8.0 apache2 php8.3 \
+        php8.3-fpm php8.3-curl php8.3-mbstring php8.3-ldap php8.3-xml php8.3-zip php8.3-gd php8.3-mysql php8.3-xdebug
 
-# Install PHP extensions
-RUN docker-php-ext-configure ldap --with-libdir="lib/$(gcc -dumpmachine)" && \
-    docker-php-ext-configure gd --with-freetype --with-jpeg && \
-    docker-php-ext-install -j$(nproc) pdo_mysql gd ldap zip && \
-    pecl install xdebug && \
-    docker-php-ext-enable xdebug
+# Create group and user with specific IDs, and give user sudo access (for service management)
+RUN userdel -r ubuntu && \
+    groupadd -g ${GROUP_ID} ${USERNAME} && \
+    useradd -u ${USER_ID} -g ${GROUP_ID} -m -s /bin/bash ${USERNAME} && \
+    echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
-# Install composer
-RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+# Install build tools (composer/node/npm)
+RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer && \
+    mkdir -p "/home/${USERNAME}/.nvm" && export NVM_DIR="/home/${USERNAME}/.nvm" && curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash && \
+        \. "/home/${USERNAME}/.nvm/nvm.sh" && \
+        nvm install 22 && \
+        chown -R ${USERNAME} "/home/${USERNAME}/.nvm" && \
+        echo 'export NVM_DIR="${HOME}/.nvm" && source "$NVM_DIR/nvm.sh"' >> "/home/${USERNAME}/.bashrc"
 
-# Configure apache
-RUN a2enmod rewrite && \
-    sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/sites-available/*.conf && \
-    sed -ri -e 's!/var/www/!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/apache2.conf /etc/apache2/conf-available/*.conf
+# Configure apache, php & mysql
+RUN a2dissite 000-default.conf && \
+    a2enmod rewrite proxy_fcgi setenvif && \
+    a2enconf php8.3-fpm && \
+    sed -i "s/www-data/${USERNAME}/g" "/etc/php/8.3/fpm/pool.d/www.conf" && \
+    sed -i "s/www-data/${USERNAME}/g" "/etc/apache2/envvars" && \
+    chmod 755 /var/run/mysqld
 
-# Use the default production configuration and update it as required
-RUN mv "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini" && \
-    sed -i 's/memory_limit = 128M/memory_limit = 512M/g' "$PHP_INI_DIR/php.ini"
+# Copy required configuration & entrypoint script
+COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+COPY apache.conf /etc/apache2/sites-enabled/bookstack.conf
+COPY setup.sql /setup.sql
+COPY entrypoint.sh /entrypoint.sh
 
-ENV APACHE_DOCUMENT_ROOT="/app/public"
-
+# Set our user, working directory, entrypoint and default command
+USER ${USERNAME}
 WORKDIR /app
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["/bin/bash"]
